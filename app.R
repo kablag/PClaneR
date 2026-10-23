@@ -4,6 +4,7 @@ library(openxlsx)
 library(shinyMolBio)
 
 source(file.path("R", "plate_logic.R"), local = TRUE)
+APP_VERSION <- "2026.10.23-10"
 
 dir.create("data", showWarnings = FALSE)
 kits_file <- file.path("data", "kits.xlsx")
@@ -12,8 +13,11 @@ if (!file.exists(kits_file)) openxlsx::write.xlsx(default_kits(), kits_file, ove
 read_kits <- function(path = kits_file) normalise_kits(openxlsx::read.xlsx(path))
 write_kits <- function(x) openxlsx::write.xlsx(normalise_kits(x), kits_file, overwrite = TRUE)
 
+# Persist the migrated schema immediately so the workbook always mirrors the UI.
+write_kits(read_kits())
+
 ui <- navbarPage(
-  title = "ПЦР-плашка 96",
+  title = paste("ПЦР-плашка 96", APP_VERSION),
   theme = bslib::bs_theme(version = 5, bootswatch = "flatly", primary = "#2563eb"),
   header = tags$head(tags$style(HTML("
     .container-fluid { max-width: 1600px; }
@@ -30,6 +34,20 @@ ui <- navbarPage(
           selectizeInput("selected_kits", "Наборы ПЦР-РВ", choices = NULL, multiple = TRUE),
           textAreaInput("samples", "Образцы (по одному в строке)", rows = 12,
                         placeholder = "S-001\nS-002\nS-003"),
+          fluidRow(
+            column(4, numericInput("sample_repeats", "Повт. образца", 2, min=1, max=12)),
+            column(4, numericInput("pko_repeats", "Повт. каждого ПКО", 1, min=0, max=12)),
+            column(4, numericInput("oko_repeats", "Повт. ОКО", 1, min=0, max=12))
+          ),
+          radioButtons("orientation", "Направление", inline = TRUE,
+                       choices = c("Горизонтально"="horizontal", "Вертикально"="vertical"),
+                       selected = "horizontal"),
+          radioButtons("grouping", "Размещение", inline = TRUE,
+                       choices = c("По наборам"="by_kit", "Сплошное"="continuous"),
+                       selected = "by_kit"),
+          radioButtons("balance", "Несколько рядов/колонок", inline = TRUE,
+                       choices = c("Зеркально"="mirrored", "Рядом"="adjacent"),
+                       selected = "mirrored"),
           checkboxInput("avoid_edges", "Сначала заполнять внутренние лунки", TRUE),
           actionButton("calculate", "Рассчитать плашку", class = "btn-primary w-100"),
           hr(),
@@ -41,6 +59,7 @@ ui <- navbarPage(
         div(class = "plate-toolbar",
           actionButton("edit_well", "Изменить выбранную"),
           actionButton("clear_wells", "Очистить выбранные"),
+          actionButton("extract_wells", "Изъять выбранное", class = "btn-warning"),
           actionButton("swap_wells", "Поменять 2 лунки местами"),
           actionButton("undo", "Отменить правку")
         ),
@@ -69,7 +88,7 @@ ui <- navbarPage(
       tags$li("Выберите одну или две лунки кликом на плашке для ручной правки."),
       tags$li("Скачайте итоговый Excel: лист Plate предназначен для переноса на прибор.")
     ),
-    p("Алгоритм сначала размещает контроли, затем только полностью помещающиеся образцы на всех выбранных наборах. Технические повторы расположены рядом.")
+    p("Алгоритм сначала размещает контроли, затем только полностью помещающиеся образцы на всех выбранных наборах. В режиме «По наборам» каждый набор начинается с новой строки или колонки; в режиме «Сплошное» лунки заполняются последовательно.")
   ))
 )
 
@@ -78,12 +97,14 @@ server <- function(input, output, session) {
   plate <- reactiveVal(empty_plate())
   history <- reactiveVal(list())
   plan_info <- reactiveVal(list(placed = character(), omitted = character(), controls = 0L))
+  layout_grouping <- reactiveVal("by_kit")
 
-  observe({
+  observeEvent(kits(), {
     x <- kits()
+    current <- isolate(input$selected_kits) %||% character()
     updateSelectizeInput(session, "selected_kits", choices = x$kit,
-                         selected = intersect(input$selected_kits %||% character(), x$kit), server = TRUE)
-  })
+                         selected = intersect(current, x$kit), server = TRUE)
+  }, ignoreInit = FALSE)
 
   save_history <- function() history(append(history(), list(plate())))
 
@@ -93,10 +114,21 @@ server <- function(input, output, session) {
     req(length(sample_ids))
     selected <- kits()[kits()$kit %in% input$selected_kits, , drop = FALSE]
     tryCatch({
-      result <- build_plate(sample_ids, selected, input$avoid_edges)
+      if (is.null(input$sample_repeats) || is.na(input$sample_repeats) || input$sample_repeats < 1) {
+        stop("Укажите число повторов образца (не меньше 1)")
+      }
+      result <- build_plate(sample_ids, selected, input$avoid_edges,
+                            input$sample_repeats, input$pko_repeats, input$oko_repeats,
+                            input$orientation, input$grouping, input$balance)
       info <- attr(result, "plan")
+      if (length(info$omitted)) {
+        stop("Все образцы не помещаются на одну 96-луночную плашку: ",
+             paste(info$omitted, collapse = ", "),
+             ". Уменьшите число повторов/наборов или разделите запуск.")
+      }
       history(list())
       plan_info(info)
+      layout_grouping(input$grouping)
       plate(result)
       if (length(info$omitted)) showNotification(
         paste(length(info$omitted), "образцов не поместились; см. сводку."), type = "warning", duration = 8)
@@ -107,7 +139,11 @@ server <- function(input, output, session) {
     x <- plate(); info <- plan_info(); occupied <- sum(x$type != "Empty")
     div(class = "status-box",
       tags$b(sprintf("Занято: %d / 96", occupied)), tags$br(),
+      sprintf("Реакций образцов: %d", sum(x$type == "Sample")), tags$br(),
       sprintf("Образцов размещено: %d", length(info$placed %||% character())), tags$br(),
+      if (length(info$placed %||% character()))
+        tags$small(paste("На плашке:", paste(info$placed, collapse = ", "))),
+      tags$br(), tags$small(paste("Алгоритм", APP_VERSION)),
       if (length(info$omitted %||% character())) tags$span(style="color:#b91c1c",
         paste("Не поместились:", paste(info$omitted, collapse = ", ")))
     )
@@ -134,14 +170,30 @@ server <- function(input, output, session) {
     if (length(pos) > 12L) return(showNotification("Сначала выберите нужные лунки кликом на плашке.", type = "warning"))
     save_history(); x <- plate(); idx <- match(pos, x$position, nomatch = 0L); idx <- idx[idx > 0L]
     x[idx, c("sample", "kit", "channels")] <- ""
-    x$type[idx] <- "Empty"; x$replicate[idx] <- NA_integer_; plate(x)
+    x$type[idx] <- "Empty"; x$replicate[idx] <- NA_integer_; x$layout_order[idx] <- NA_integer_; plate(x)
+  })
+
+  observeEvent(input$extract_wells, {
+    pos <- selected_positions(); req(length(pos))
+    if (length(pos) > 12L) return(showNotification("Сначала выберите нужные лунки кликом на плашке.", type = "warning"))
+    x <- plate()
+    occupied <- pos[pos %in% x$position[x$type != "Empty"]]
+    if (!length(occupied)) return(showNotification("В выбранных лунках нет реакций для изъятия.", type = "warning"))
+    save_history()
+    x <- compact_plate(x, occupied, preserve_kits = identical(layout_grouping(), "by_kit"))
+    plate(x)
+    info <- plan_info()
+    actual_samples <- unique(x$sample[x$type == "Sample"])
+    info$placed <- (info$placed %||% character())[info$placed %in% actual_samples]
+    plan_info(info)
+    showNotification(paste("Изъято реакций:", length(occupied), "— последующие лунки сдвинуты."), type = "message")
   })
 
   observeEvent(input$swap_wells, {
     pos <- selected_positions()
     if (length(pos) != 2L) return(showNotification("Выберите ровно две лунки.", type = "warning"))
     save_history(); x <- plate(); idx <- match(pos, x$position)
-    cols <- c("sample", "kit", "type", "replicate", "channels")
+    cols <- c("sample", "kit", "type", "replicate", "channels", "layout_order")
     tmp <- x[idx[1], cols]; x[idx[1], cols] <- x[idx[2], cols]; x[idx[2], cols] <- tmp
     plate(x)
   })
@@ -162,11 +214,14 @@ server <- function(input, output, session) {
     pos <- selected_positions(); req(length(pos) == 1L)
     save_history(); x <- plate(); i <- match(pos, x$position)
     if (input$well_type == "Empty") {
-      x[i, c("sample", "kit", "channels")] <- ""; x$type[i] <- "Empty"; x$replicate[i] <- NA_integer_
+      x[i, c("sample", "kit", "channels")] <- ""; x$type[i] <- "Empty"; x$replicate[i] <- NA_integer_; x$layout_order[i] <- NA_integer_
     } else {
       x$sample[i] <- trimws(input$well_sample); x$kit[i] <- input$well_kit; x$type[i] <- input$well_type
       x$replicate[i] <- as.integer(input$well_replicate)
       x$channels[i] <- kits()$channels[match(input$well_kit, kits()$kit)] %||% ""
+      if (is.na(x$layout_order[i])) x$layout_order[i] <- max(c(0L, x$layout_order), na.rm=TRUE) + 1L
+      if (is.na(x$layout_slot[i])) x$layout_slot[i] <- max(c(0L, x$layout_slot), na.rm=TRUE) + 1L
+      if (!nzchar(x$layout_kit[i])) x$layout_kit[i] <- input$well_kit
     }
     plate(x); removeModal()
   })
@@ -178,22 +233,24 @@ server <- function(input, output, session) {
   })
 
   output$plate_table <- renderDT({
-    x <- plate(); x <- x[x$type != "Empty", c("position", "sample", "kit", "type", "replicate", "channels")]
+    x <- plate(); x <- x[x$type != "Empty", ]; x <- x[order(x$layout_order, na.last=TRUE), ]
+    x <- x[c("position", "sample", "kit", "type", "replicate", "channels")]
     datatable(x, rownames = FALSE, options = list(pageLength = 10),
               colnames = c("Лунка", "Образец", "Набор", "Тип", "Повтор", "Каналы"))
   })
 
   output$kits_table <- renderDT(datatable(kits(), selection = "single", rownames = FALSE,
     options = list(pageLength = 12),
-    colnames = c("Набор", "Каналы", "Повт. образца", "Название ПКО", "Повт. ПКО", "Название ОКО", "Повт. ОКО")))
+    colnames = c("Набор", "Каналы", "ПКО_wt", "ПКО_h", "ПКО_m", "ОКО")))
 
   kit_dialog <- function(row = NULL) {
     if (is.null(row)) row <- default_kits()[1, ]
     showModal(modalDialog(title = "Параметры набора",
       textInput("kit_name", "Название", row$kit), textInput("kit_channels", "Каналы", row$channels),
-      numericInput("kit_sample_repeats", "Повторов образца", row$sample_repeats, min=0, max=12),
-      textInput("kit_pko_name", "Название ПКО", row$pko_name), numericInput("kit_pko_repeats", "Повторов ПКО", row$pko_repeats, min=0, max=12),
-      textInput("kit_oko_name", "Название ОКО", row$oko_name), numericInput("kit_oko_repeats", "Повторов ОКО", row$oko_repeats, min=0, max=12),
+      textInput("kit_pko_wt_name", "Название ПКО_wt", row$pko_wt_name),
+      textInput("kit_pko_h_name", "Название ПКО_h", row$pko_h_name),
+      textInput("kit_pko_m_name", "Название ПКО_m", row$pko_m_name),
+      textInput("kit_oko_name", "Название ОКО", row$oko_name),
       footer=tagList(modalButton("Отмена"), actionButton("save_kit", "Сохранить", class="btn-primary"))))
   }
   editing_kit <- reactiveVal(NA_integer_)
@@ -205,8 +262,8 @@ server <- function(input, output, session) {
   })
   observeEvent(input$save_kit, {
     row <- data.frame(kit=trimws(input$kit_name), channels=trimws(input$kit_channels),
-      sample_repeats=input$kit_sample_repeats, pko_name=trimws(input$kit_pko_name), pko_repeats=input$kit_pko_repeats,
-      oko_name=trimws(input$kit_oko_name), oko_repeats=input$kit_oko_repeats, stringsAsFactors=FALSE)
+      pko_wt_name=trimws(input$kit_pko_wt_name), pko_h_name=trimws(input$kit_pko_h_name),
+      pko_m_name=trimws(input$kit_pko_m_name), oko_name=trimws(input$kit_oko_name), stringsAsFactors=FALSE)
     x <- kits(); i <- editing_kit(); if (is.na(i)) x <- rbind(x, row) else x[i, ] <- row
     tryCatch({ x <- normalise_kits(x); write_kits(x); kits(x); removeModal() },
              error=function(e) showNotification(conditionMessage(e), type="error"))
@@ -226,7 +283,8 @@ server <- function(input, output, session) {
   output$download_plate <- downloadHandler(
     filename = function() paste0("PCR_plate_", Sys.Date(), ".xlsx"),
     content = function(file) {
-      x <- plate(); occupied <- x[x$type != "Empty", c("position", "sample", "kit", "type", "replicate", "channels")]
+      x <- plate(); occupied <- x[x$type != "Empty", ]; occupied <- occupied[order(occupied$layout_order, na.last=TRUE), ]
+      occupied <- occupied[c("position", "sample", "kit", "type", "replicate", "channels")]
       matrix_view <- matrix("", nrow=8, ncol=12, dimnames=list(LETTERS[1:8], 1:12))
       for (i in seq_len(nrow(x))) matrix_view[x$row[i], as.character(x$column[i])] <- if (x$type[i] == "Empty") "" else paste(x$sample[i], x$kit[i], sep=" | ")
       openxlsx::write.xlsx(list(Plate=occupied, Map=as.data.frame(matrix_view), Kits=kits()), file, overwrite=TRUE)
