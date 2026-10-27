@@ -5,7 +5,7 @@ library(shinyMolBio)
 
 source(file.path("R", "plate_logic.R"), local = TRUE)
 source(file.path("R", "export_formats.R"), local = TRUE)
-APP_VERSION <- "2026.10.27-11"
+APP_VERSION <- "2026.10.27-12"
 
 dir.create("data", showWarnings = FALSE)
 kits_file <- file.path("data", "kits.xlsx")

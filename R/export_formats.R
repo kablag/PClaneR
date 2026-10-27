@@ -8,15 +8,9 @@ ordered_plate <- function(plate) {
 }
 
 innova_sample_id <- function(sample, type) {
-  result <- sample
-  result[type == "PCO" & grepl("_wt", sample, ignore.case = TRUE)] <- "ПКО 1"
-  result[type == "PCO" & grepl("_h", sample, ignore.case = TRUE)] <- "ПКО 2"
-  result[type == "PCO" & grepl("_m", sample, ignore.case = TRUE)] <- "ПКО 3"
-  # Fallback for custom positive-control names without wt/h/m suffixes.
-  other_pco <- which(type == "PCO" & !grepl("_wt|_h|_m", sample, ignore.case = TRUE))
-  if (length(other_pco)) result[other_pco] <- sample[other_pco]
-  result[type == "NTC"] <- "к- ПЦР"
-  result
+  # The instrument-specific code is stored separately in Sample Type.
+  # Keep Sample ID exactly as it is named in the plate planner.
+  as.character(sample)
 }
 
 write_innova_xlsx <- function(plate, file, template = file.path("data", "innova.xlsx")) {

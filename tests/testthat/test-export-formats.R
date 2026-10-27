@@ -9,7 +9,9 @@ testthat::test_that("Innova maps samples and controls to instrument types", {
   x <- openxlsx::read.xlsx(file, sheet="Sample Set", colNames=FALSE,
                            skipEmptyRows=FALSE, skipEmptyCols=FALSE)
   testthat::expect_true(all(c("UN", "PC", "NC") %in% x[[4]]))
-  testthat::expect_true(all(c("S1", "S2", "ПКО 1", "ПКО 2", "ПКО 3", "к- ПЦР") %in% x[[5]]))
+  expected_names <- plate$sample[plate$type != "Empty"]
+  testthat::expect_true(all(expected_names %in% x[[5]]))
+  testthat::expect_false(any(c("ПКО 1", "ПКО 2", "ПКО 3", "к- ПЦР") %in% x[[5]]))
   testthat::expect_equal(x[[3]][3], "A1")
 })
 
