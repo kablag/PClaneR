@@ -4,7 +4,8 @@ library(openxlsx)
 library(shinyMolBio)
 
 source(file.path("R", "plate_logic.R"), local = TRUE)
-APP_VERSION <- "2026.10.23-10"
+source(file.path("R", "export_formats.R"), local = TRUE)
+APP_VERSION <- "2026.10.27-11"
 
 dir.create("data", showWarnings = FALSE)
 kits_file <- file.path("data", "kits.xlsx")
@@ -51,7 +52,11 @@ ui <- navbarPage(
           checkboxInput("avoid_edges", "Сначала заполнять внутренние лунки", TRUE),
           actionButton("calculate", "Рассчитать плашку", class = "btn-primary w-100"),
           hr(),
-          downloadButton("download_plate", "Скачать разметку XLSX", class = "w-100")
+          selectInput("export_format", "Формат экспорта",
+                      choices=c("Рабочая книга XLSX"="internal_xlsx",
+                                "Innova Sample Set XLSX"="innova_xlsx",
+                                "Bio-Rad Spreadsheet CSV"="biorad_csv")),
+          downloadButton("download_plate", "Скачать для прибора", class = "w-100")
         ),
         uiOutput("summary")
       ),
@@ -86,9 +91,9 @@ ui <- navbarPage(
       tags$li("Настройте наборы на вкладке «Наборы»."),
       tags$li("Выберите наборы, вставьте список образцов и рассчитайте раскладку."),
       tags$li("Выберите одну или две лунки кликом на плашке для ручной правки."),
-      tags$li("Скачайте итоговый Excel: лист Plate предназначен для переноса на прибор.")
+      tags$li("Выберите формат экспорта: рабочий XLSX, Innova XLSX или Bio-Rad CSV для Spreadsheet View/Importer.")
     ),
-    p("Алгоритм сначала размещает контроли, затем только полностью помещающиеся образцы на всех выбранных наборах. В режиме «По наборам» каждый набор начинается с новой строки или колонки; в режиме «Сплошное» лунки заполняются последовательно.")
+    p("Bio-Rad PLTD является зашифрованным форматом. CSV загружается в CFX Manager через Plate Editor → Spreadsheet View/Importer → Import.")
   ))
 )
 
@@ -281,13 +286,15 @@ server <- function(input, output, session) {
 
   output$download_kits <- downloadHandler("kits.xlsx", function(file) openxlsx::write.xlsx(kits(), file, overwrite=TRUE))
   output$download_plate <- downloadHandler(
-    filename = function() paste0("PCR_plate_", Sys.Date(), ".xlsx"),
+    filename = function() switch(input$export_format,
+      innova_xlsx = paste0("Innova_plate_", Sys.Date(), ".xlsx"),
+      biorad_csv = paste0("BioRad_plate_", Sys.Date(), ".csv"),
+      paste0("PCR_plate_", Sys.Date(), ".xlsx")),
     content = function(file) {
-      x <- plate(); occupied <- x[x$type != "Empty", ]; occupied <- occupied[order(occupied$layout_order, na.last=TRUE), ]
-      occupied <- occupied[c("position", "sample", "kit", "type", "replicate", "channels")]
-      matrix_view <- matrix("", nrow=8, ncol=12, dimnames=list(LETTERS[1:8], 1:12))
-      for (i in seq_len(nrow(x))) matrix_view[x$row[i], as.character(x$column[i])] <- if (x$type[i] == "Empty") "" else paste(x$sample[i], x$kit[i], sep=" | ")
-      openxlsx::write.xlsx(list(Plate=occupied, Map=as.data.frame(matrix_view), Kits=kits()), file, overwrite=TRUE)
+      switch(input$export_format,
+        innova_xlsx = write_innova_xlsx(plate(), file),
+        biorad_csv = write_biorad_csv(plate(), file),
+        write_internal_xlsx(plate(), kits(), file))
     })
 }
 
