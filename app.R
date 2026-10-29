@@ -36,7 +36,7 @@ ui <- navbarPage(
           textAreaInput("samples", "Образцы (по одному в строке)", rows = 12,
                         placeholder = "S-001\nS-002\nS-003"),
           fluidRow(
-            column(4, numericInput("sample_repeats", "Повт. образца", 2, min=1, max=12)),
+            column(4, numericInput("sample_repeats", "Повт. образца", 1, min=1, max=12)),
             column(4, numericInput("pko_repeats", "Повт. каждого ПКО", 1, min=0, max=12)),
             column(4, numericInput("oko_repeats", "Повт. ОКО", 1, min=0, max=12))
           ),
@@ -55,7 +55,8 @@ ui <- navbarPage(
           selectInput("export_format", "Формат экспорта",
                       choices=c("Рабочая книга XLSX"="internal_xlsx",
                                 "Innova Sample Set XLSX"="innova_xlsx",
-                                "Bio-Rad Spreadsheet CSV"="biorad_csv")),
+                                "Bio-Rad Spreadsheet CSV"="biorad_csv"),
+                              selected = "innova_xlsx"),
           downloadButton("download_plate", "Скачать для прибора", class = "w-100")
         ),
         uiOutput("summary")
