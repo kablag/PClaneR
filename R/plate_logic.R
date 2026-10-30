@@ -155,6 +155,7 @@ empty_plate <- function() {
     layout_order = NA_integer_,
     layout_slot = NA_integer_,
     layout_kit = "",
+    manual = FALSE,
     stringsAsFactors = FALSE
   )
 }
@@ -201,8 +202,9 @@ parse_samples <- function(text) {
 
 make_reactions <- function(samples, kits, sample_repeats = 2L,
                            pko_repeats = 1L, oko_repeats = 1L,
-                           capacity = 96L) {
+                           capacity = 96L, controls_position = c("end", "beginning")) {
   kits <- normalise_kits(kits)
+  controls_position <- match.arg(controls_position)
   repeats <- as.integer(c(sample_repeats, pko_repeats, oko_repeats))
   if (anyNA(repeats) || any(repeats < 0L)) stop("Число повторов должно быть целым и неотрицательным")
   sample_repeats <- repeats[1]; pko_repeats <- repeats[2]; oko_repeats <- repeats[3]
@@ -240,7 +242,8 @@ make_reactions <- function(samples, kits, sample_repeats = 2L,
     }))
   }))
   if (is.null(sample_rxns)) sample_rxns <- controls[0, ]
-  list(reactions = rbind(sample_rxns, controls), placed = placed_samples,
+  reactions <- if (controls_position == "beginning") rbind(controls, sample_rxns) else rbind(sample_rxns, controls)
+  list(reactions = reactions, placed = placed_samples,
        omitted = setdiff(samples, placed_samples), controls = nrow(controls))
 }
 
@@ -248,11 +251,14 @@ build_plate <- function(samples, kits, avoid_edges = TRUE, sample_repeats = 2L,
                         pko_repeats = 1L, oko_repeats = 1L,
                         orientation = c("horizontal", "vertical"),
                         grouping = c("by_kit", "continuous"),
-                        balance = c("mirrored", "adjacent")) {
+                        balance = c("mirrored", "adjacent"),
+                        controls_position = c("end", "beginning")) {
   orientation <- match.arg(orientation)
   grouping <- match.arg(grouping)
   balance <- match.arg(balance)
-  plan <- make_reactions(samples, kits, sample_repeats, pko_repeats, oko_repeats)
+  controls_position <- match.arg(controls_position)
+  plan <- make_reactions(samples, kits, sample_repeats, pko_repeats, oko_repeats,
+                         controls_position = controls_position)
   result <- empty_plate()
   rxns <- plan$reactions
   if (nrow(rxns)) {
@@ -283,11 +289,12 @@ compact_plate <- function(plate, remove_positions, preserve_kits = FALSE) {
   remove_idx <- remove_idx[remove_idx > 0L & plate$type[remove_idx] != "Empty"]
   if (!length(remove_idx)) return(plate)
 
-  content <- c("sample", "kit", "type", "replicate", "channels")
+  content <- c("sample", "kit", "type", "replicate", "channels", "manual")
   plate[remove_idx, c("sample", "kit", "channels")] <- ""
   plate$type[remove_idx] <- "Empty"
   plate$replicate[remove_idx] <- NA_integer_
   plate$layout_order[remove_idx] <- NA_integer_
+  plate$manual[remove_idx] <- FALSE
 
   groups <- if (isTRUE(preserve_kits)) unique(plate$layout_kit[nzchar(plate$layout_kit)]) else "__all__"
   next_order <- 1L
@@ -302,6 +309,7 @@ compact_plate <- function(plate, remove_positions, preserve_kits = FALSE) {
     plate$type[slot_idx] <- "Empty"
     plate$replicate[slot_idx] <- NA_integer_
     plate$layout_order[slot_idx] <- NA_integer_
+    plate$manual[slot_idx] <- FALSE
     if (nrow(remaining)) {
       target <- head(slot_idx, nrow(remaining))
       plate[target, content] <- remaining[content]
@@ -322,7 +330,9 @@ plate_for_widget <- function(plate) {
   plate$fdata.name <- plate$sample
   plate$react.id <- seq_len(nrow(plate))
   plate$type_label <- unname(type_labels[plate$type])
-  plate$label <- ifelse(plate$type == "Empty", "", paste0(plate$sample, "<br><small>", plate$kit, "</small>"))
-  plate$style <- paste0("background-color:", unname(colors[plate$type]), ";")
+  if (!"manual" %in% names(plate)) plate$manual <- FALSE
+  marker <- ifelse(plate$manual & plate$type != "Empty", "<span class='manual-marker'>●</span>", "")
+  plate$label <- ifelse(plate$type == "Empty", "", paste0(marker, plate$sample, "<br><small>", plate$kit, "</small>"))
+  plate$style <- paste0("position:relative;background-color:", unname(colors[plate$type]), ";")
   plate
 }
